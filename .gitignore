@@ -23,3 +23,5 @@ stored_data/
 checkpoints/
 raw_czech/
 training_history/
+
+.venv
