@@ -25,7 +25,7 @@ class DecoderLayer(tf.keras.layers.Layer):
         self.dropout2 = tf.keras.layers.Dropout(rate)
         self.dropout3 = tf.keras.layers.Dropout(rate)
 
-    def call(self, x, training, look_ahead_mask, padding_mask):
+    def call(self, x, look_ahead_mask, padding_mask, training=True):
         # enc_output.shape == (batch_size, input_seq_len, d_model)
 
         attn1, attn_weights_block1 = self.mha1(
@@ -61,7 +61,7 @@ class Decoder(tf.keras.layers.Layer):
 
         self.input_layer = tf.keras.Sequential(
             [
-                tf.keras.layers.Input((None, None, inp_dim)),
+                tf.keras.layers.Input((None, inp_dim)),
                 tf.keras.layers.Dense(
                     dff, activation="relu"
                 ),  # (batch_size, seq_len, dff)
@@ -76,7 +76,7 @@ class Decoder(tf.keras.layers.Layer):
         ]
         self.dropout = tf.keras.layers.Dropout(rate)
 
-    def call(self, x, training, look_ahead_mask, padding_mask):
+    def call(self, x, look_ahead_mask, padding_mask, training=True):
         x = self.input_layer(x)
 
         seq_len = tf.shape(x)[1]
@@ -87,7 +87,9 @@ class Decoder(tf.keras.layers.Layer):
         x = self.dropout(x, training=training)
 
         for i in range(self.num_layers):
-            x, block1 = self.dec_layers[i](x, training, look_ahead_mask, padding_mask)
+            x, block1 = self.dec_layers[i](
+                x, look_ahead_mask, padding_mask, training=training
+            )
 
             attention_weights["decoder_layer{}_block1".format(i + 1)] = block1
 
@@ -147,7 +149,7 @@ class Transformer(tf.keras.Model):
             [(x, []) for x in ["loss", "val_loss", "val_loss_full", "parts"]]
         )
 
-    def call(self, tar, training, look_ahead_mask, dec_padding_mask):
+    def call(self, tar, look_ahead_mask, dec_padding_mask, training=True):
         tar_inp = tar[:, :-1]  # predict next from this
         tar_out = tar[:, 1:]
 
@@ -155,7 +157,10 @@ class Transformer(tf.keras.Model):
 
         # dec_output.shape == (batch_size, tar_seq_len, d_model)
         dec_output, attention_weights = self.decoder(
-            tar_inp, training, look_ahead_mask, dec_padding_mask
+            tar_inp,
+            look_ahead_mask,
+            dec_padding_mask,
+            training=training,
         )
 
         #         print(f"dec_output shape {dec_output.shape}")
@@ -190,7 +195,7 @@ class Transformer(tf.keras.Model):
         #         print(inp.shape, tar.shape, combined_mask.shape, dec_padding_mask.shape)
 
         with tf.GradientTape() as tape:
-            predictions, _ = self(inp, True, combined_mask, dec_padding_mask)
+            predictions, _ = self(inp, combined_mask, dec_padding_mask)
 
             loss, *_ = self.loss_function(tar, predictions)
 
@@ -202,7 +207,7 @@ class Transformer(tf.keras.Model):
     def val_step(self, inp, tar):
         combined_mask, dec_padding_mask = create_masks(tar)
 
-        predictions, _ = self(inp, False, combined_mask, dec_padding_mask)
+        predictions, _ = self(inp, combined_mask, dec_padding_mask, training=False)
 
         return self.loss_function(tar, predictions)
 
@@ -225,7 +230,7 @@ class Transformer(tf.keras.Model):
         for epoch in range(epochs):
             start = time.time()
 
-            self.train_loss.reset_states()
+            self.train_loss.reset_state()
 
             for batch_no, (inp, tar) in enumerate(train_batches):
                 self.train_step(inp, tar)
