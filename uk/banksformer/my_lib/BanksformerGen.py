@@ -1,100 +1,53 @@
 import tensorflow as tf
 import time
+import keras
+from keras import layers
 
 from .transformer_core import *
 
 
-train_step_signature = [
-    tf.TensorSpec(shape=(None, None, None), dtype=tf.float64),
-]
+def decoder_layer(
+    d_model: int, num_heads: int, dff: int, rate=0.1, epsilon=1e-6, suffix=""
+) -> keras.Model:
+    x = layers.Input(shape=(None, d_model))
+    mask = layers.Input(shape=(None, None, None))
+
+    y = layers.MultiHeadAttention(num_heads, d_model)(x, x, x, attention_mask=mask)
+    y = layers.Dropout(rate)(y)
+    y = layers.LayerNormalization(epsilon=epsilon)(y + x)
+
+    z = point_wise_feed_forward_network(d_model, dff)(y)
+    z = layers.Dropout(rate)(y)
+    z = layers.LayerNormalization(epsilon=epsilon)(z + y)
+
+    return keras.Model([x, mask], z, name="DecLayer" + suffix)
 
 
-class DecoderLayer(tf.keras.layers.Layer):
-    def __init__(self, d_model, num_heads, dff, rate=0.1):
-        super(DecoderLayer, self).__init__()
+def decoder(
+    num_layers: int,
+    d_model: int,
+    num_heads: int,
+    dff: int,
+    max_pe: int,
+    inp_dim: int,
+    rate=0.1,
+    epsilon=1e-6,
+) -> keras.Model:
+    x = layers.Input(shape=(None, inp_dim))
+    mask = layers.Input(shape=(None, None, None))
 
-        self.mha1 = MultiHeadAttention(d_model, num_heads)
+    y = layers.Dense(dff, activation="relu")(x)
+    y = layers.Dense(d_model, activation="relu")(y)
 
-        self.ffn = point_wise_feed_forward_network(d_model, dff)
+    pos_enc = positional_encoding(max_pe, d_model)
+    y = layers.Lambda(lambda y: y + pos_enc[:, : y.shape[1], :])(y)
+    y = layers.Dropout(rate)(y)
+    for i in range(num_layers):
+        y = decoder_layer(
+            d_model, num_heads, dff, rate=rate, epsilon=epsilon, suffix=str(i)
+        )([y, mask])
 
-        self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-        self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-        self.layernorm3 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-
-        self.dropout1 = tf.keras.layers.Dropout(rate)
-        self.dropout2 = tf.keras.layers.Dropout(rate)
-        self.dropout3 = tf.keras.layers.Dropout(rate)
-
-    def call(self, x, look_ahead_mask, padding_mask, training=True):
-        # enc_output.shape == (batch_size, input_seq_len, d_model)
-
-        attn1, attn_weights_block1 = self.mha1(
-            x, x, x, look_ahead_mask
-        )  # (batch_size, target_seq_len, d_model)
-        attn1 = self.dropout1(attn1, training=training)
-        out1 = self.layernorm1(attn1 + x)
-
-        ffn_output = self.ffn(out1)  # (batch_size, target_seq_len, d_model)
-        ffn_output = self.dropout3(ffn_output, training=training)
-        out3 = self.layernorm3(
-            ffn_output + out1
-        )  # (batch_size, target_seq_len, d_model)
-
-        return out3, attn_weights_block1
-
-
-class Decoder(tf.keras.layers.Layer):
-    def __init__(
-        self,
-        num_layers,
-        d_model,
-        num_heads,
-        dff,
-        maximum_position_encoding,
-        inp_dim,
-        rate=0.1,
-    ):
-        super(Decoder, self).__init__()
-
-        self.d_model = d_model
-        self.num_layers = num_layers
-
-        self.input_layer = tf.keras.Sequential(
-            [
-                tf.keras.layers.Input((None, inp_dim)),
-                tf.keras.layers.Dense(
-                    dff, activation="relu"
-                ),  # (batch_size, seq_len, dff)
-                tf.keras.layers.Dense(d_model),  # (batch_size, seq_len, d_model)
-            ]
-        )
-
-        self.pos_encoding = positional_encoding(maximum_position_encoding, d_model)
-
-        self.dec_layers = [
-            DecoderLayer(d_model, num_heads, dff, rate) for _ in range(num_layers)
-        ]
-        self.dropout = tf.keras.layers.Dropout(rate)
-
-    def call(self, x, look_ahead_mask, padding_mask, training=True):
-        x = self.input_layer(x)
-
-        seq_len = tf.shape(x)[1]
-        attention_weights = {}
-
-        x += self.pos_encoding[:, :seq_len, :]
-
-        x = self.dropout(x, training=training)
-
-        for i in range(self.num_layers):
-            x, block1 = self.dec_layers[i](
-                x, look_ahead_mask, padding_mask, training=training
-            )
-
-            attention_weights["decoder_layer{}_block1".format(i + 1)] = block1
-
-        # x.shape == (batch_size, target_seq_len, d_model)
-        return x, attention_weights
+    return keras.Model([x, mask], y, name="Decoder")
 
 
 class Transformer(tf.keras.Model):
@@ -114,7 +67,7 @@ class Transformer(tf.keras.Model):
     ):
         super(Transformer, self).__init__()
 
-        self.decoder = Decoder(
+        self.decoder = decoder(
             num_layers_dec,
             d_model,
             num_heads,
@@ -156,12 +109,7 @@ class Transformer(tf.keras.Model):
         #         print(f"tar shape {tar.shape}", f"tar_inp shape {tar_inp.shape}", f"tar_out shape {tar_out.shape}")
 
         # dec_output.shape == (batch_size, tar_seq_len, d_model)
-        dec_output, attention_weights = self.decoder(
-            tar_inp,
-            look_ahead_mask,
-            dec_padding_mask,
-            training=training,
-        )
+        dec_output = self.decoder([tar_inp, look_ahead_mask], training=training)
 
         #         print(f"dec_output shape {dec_output.shape}")
         #         print(f"final_output shape {final_output.shape}")
@@ -185,7 +133,7 @@ class Transformer(tf.keras.Model):
         #             print("Final output shape after",net_name, "is", final_output.shape, "\n")
 
         #
-        return preds, attention_weights
+        return preds, {}
 
     #     @tf.function(input_signature=train_step_signature)
     def train_step(self, inp, tar):
