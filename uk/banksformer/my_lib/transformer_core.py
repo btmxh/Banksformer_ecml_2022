@@ -25,11 +25,16 @@ def create_look_ahead_mask(size):
 
 
 def create_padding_mask(seq):
-    seq = tf.cast(tf.math.equal(tf.reduce_sum(seq, axis=2), 0), tf.float32)
+    seq = tf.cast(tf.math.not_equal(tf.reduce_sum(seq, axis=2), 0), tf.float32)[
+        :,
+        tf.newaxis,
+        :,
+        tf.newaxis,
+    ]
 
     # add extra dimensions to add the padding
     # to the attention logits.
-    return seq[:, tf.newaxis, tf.newaxis, :]  # (batch_size, 1, 1, seq_len)
+    return seq
 
 
 def create_masks(tar):
@@ -38,7 +43,7 @@ def create_masks(tar):
     # the decoder.
     look_ahead_mask = create_look_ahead_mask(tf.shape(tar)[1])
     dec_target_padding_mask = create_padding_mask(tar)
-    combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
+    combined_mask = tf.minimum(dec_target_padding_mask, look_ahead_mask)
 
     return combined_mask, dec_target_padding_mask
 

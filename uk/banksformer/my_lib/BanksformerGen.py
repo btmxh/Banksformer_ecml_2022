@@ -50,202 +50,57 @@ def decoder(
     return keras.Model([x, mask], y, name="Decoder")
 
 
-class Transformer(tf.keras.Model):
-    def __init__(
-        self,
-        num_layers_enc,
+def Transformer(
+    num_layers_enc: int,
+    num_layers_dec: int,
+    d_model: int,
+    num_heads: int,
+    dff: int,
+    maximum_position_encoding: int,
+    inp_dim: int,
+    config,
+    rate=0.1,
+    epsilon=1e-6,
+) -> keras.Model:
+    tar = layers.Input(shape=(None, inp_dim), name="x")
+    mask = layers.Input(shape=(None, None, None), name="mask")
+    tar_inp = tar[:, :-1]
+    tar_out = tar[:, 1:]
+    y = decoder(
         num_layers_dec,
         d_model,
         num_heads,
         dff,
         maximum_position_encoding,
-        net_info,
         inp_dim,
-        final_dim,
-        config,
-        rate=0.1,
-    ):
-        super(Transformer, self).__init__()
+        rate=rate,
+        epsilon=epsilon,
+    )([tar_inp, mask])
+    y = layers.Dense(d_model)(y)
 
-        self.decoder = decoder(
-            num_layers_dec,
-            d_model,
-            num_heads,
-            dff,
-            maximum_position_encoding,
-            inp_dim,
-            rate,
-        )
+    outputs = []
 
-        self.final_layer = tf.keras.layers.Dense(d_model, activation=None)
+    for name in config["ORDER"]:
+        dim = config["FIELD_DIMS_NET"][name]
+        acti = config["ACTIVATIONS"].get(name, None)
+        out = layers.Dense(dim, activation=acti, name=name)(y)
+        outputs.append(out)
 
-        #         self.pre_date_order = config["PRE_DATE_ORDER"]
-        #         self.date_fields = config["DATE_ORDER"]
-        #         self.post_date_order = config["POST_DATE_ORDER"]
+        st = config["FIELD_STARTS_IN"][name]
+        end = st + config["FIELD_DIMS_IN"][name]
+        to_add = tar_out[:, :, st:end]
+        y = layers.Concatenate()([y, to_add])
 
-        #         self.FIELD_STARTS = config["FIELD_STARTS"]
-        #         self.FIELD_DIMS = config["FIELD_DIMS"]
+    return keras.Model([tar, mask], outputs, name="Transformer")
 
-        self.ORDER = config["ORDER"]
-        self.FIELD_STARTS_IN = config["FIELD_STARTS_IN"]
-        self.FIELD_DIMS_IN = config["FIELD_DIMS_IN"]
-        self.FIELD_STARTS_NET = config["FIELD_STARTS_NET"]
-        self.FIELD_DIMS_NET = config["FIELD_DIMS_NET"]
-        self.ACTIVATIONS = config["ACTIVATIONS"]
 
-        for name, dim in self.FIELD_DIMS_NET.items():
-            acti = self.ACTIVATIONS.get(name, None)
-            self.__setattr__(name, tf.keras.layers.Dense(dim, activation=acti))
+def masked_loss(loss_fn):
+    def masked(y_true, y_pred):
+        mask = tf.not_equal(tf.reduce_sum(y_true, axis=2), 0)
+        mask = tf.cast(mask, dtype=y_true.dtype)
+        raw_loss = loss_fn(y_true, y_pred)
+        raw_loss *= mask
+        print(raw_loss.shape)
+        return tf.reduce_sum(raw_loss) / tf.reduce_sum(mask, axis=-1)
 
-        self.train_loss = tf.keras.metrics.Mean(name="train_loss")
-        self.results = dict(
-            [(x, []) for x in ["loss", "val_loss", "val_loss_full", "parts"]]
-        )
-
-    def call(self, tar, look_ahead_mask, dec_padding_mask, training=True):
-        tar_inp = tar[:, :-1]  # predict next from this
-        tar_out = tar[:, 1:]
-
-        #         print(f"tar shape {tar.shape}", f"tar_inp shape {tar_inp.shape}", f"tar_out shape {tar_out.shape}")
-
-        # dec_output.shape == (batch_size, tar_seq_len, d_model)
-        dec_output = self.decoder([tar_inp, look_ahead_mask], training=training)
-
-        #         print(f"dec_output shape {dec_output.shape}")
-        #         print(f"final_output shape {final_output.shape}")
-
-        final_output = self.final_layer(dec_output)
-        preds = {}
-
-        #         print("Final output shape start", final_output.shape)
-        for net_name in self.ORDER:
-            #             print("Running net", net_name)
-            pred = self.__getattribute__(net_name)(final_output)
-            #             print("pred shape", pred.shape)
-            preds[net_name] = pred
-
-            st = self.FIELD_STARTS_IN[net_name]
-            end = st + self.FIELD_DIMS_IN[net_name]
-            to_add = tar_out[:, :, st:end]
-            #             print("Start and end", st, end)
-
-            final_output = tf.concat([final_output, to_add], axis=-1)
-        #             print("Final output shape after",net_name, "is", final_output.shape, "\n")
-
-        #
-        return preds, {}
-
-    #     @tf.function(input_signature=train_step_signature)
-    def train_step(self, inp, tar):
-        combined_mask, dec_padding_mask = create_masks(tar)
-
-        #         print("Shapes of inp, tar, combined_mask, dec_padding_mask")
-        #         print(inp.shape, tar.shape, combined_mask.shape, dec_padding_mask.shape)
-
-        with tf.GradientTape() as tape:
-            predictions, _ = self(inp, combined_mask, dec_padding_mask)
-
-            loss, *_ = self.loss_function(tar, predictions)
-
-        gradients = tape.gradient(loss, self.trainable_variables)
-        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
-
-        self.train_loss(loss)
-
-    def val_step(self, inp, tar):
-        combined_mask, dec_padding_mask = create_masks(tar)
-
-        predictions, _ = self(inp, combined_mask, dec_padding_mask, training=False)
-
-        return self.loss_function(tar, predictions)
-
-    def fit(
-        self,
-        train_batches,
-        x_cv,
-        y_cv,
-        epochs,
-        early_stop=2,
-        print_every=50,
-        ckpt_every=2,
-        mid_epoch_updates=None,
-    ):
-        warned_acc = False
-
-        if mid_epoch_updates:
-            batch_per_update = len(train_batches) // mid_epoch_updates
-
-        for epoch in range(epochs):
-            start = time.time()
-
-            self.train_loss.reset_state()
-
-            for batch_no, (inp, tar) in enumerate(train_batches):
-                self.train_step(inp, tar)
-
-                if batch_no % print_every == 0:
-                    print(
-                        f"Epoch {epoch + 1} Batch {batch_no} Loss {self.train_loss.result():.4f}"
-                    )
-
-                if mid_epoch_updates:
-                    if batch_no % batch_per_update == 0:
-                        v_loss, *vl_parts = self.val_step(x_cv, y_cv)
-                        if len(vl_parts) == 1:
-                            vl_parts = vl_parts[0]
-
-                        self.results["loss"].append(self.train_loss.result().numpy())
-                        self.results["val_loss"].append(v_loss)
-                        self.results["parts"].append(vl_parts)
-
-                        try:
-                            acc_res = self.acc_function()
-
-                            acc_list = self.results.get("val_acc", [])
-                            acc_list.append(acc_res)
-                            self.results["val_acc"] = acc_list
-                        except Exception as e:
-                            if not warned_acc:
-                                warned_acc = True
-                                print("Not recording acc:", e)
-
-            print(f"Epoch {epoch + 1} Loss {self.train_loss.result():.4f}")
-
-            v_loss, *vl_parts = self.val_step(x_cv, y_cv)
-            if len(vl_parts) == 1:
-                vl_parts = vl_parts[0]
-
-            print(f"** on validation data loss is {v_loss:.4f}")
-
-            #             dict(zip(["full"] + DATA_KEY_ORDER, [full.numpy()] + [x.numpy() for x in parts]))
-
-            self.results["loss"].append(self.train_loss.result().numpy())
-            self.results["val_loss"].append(v_loss)
-            self.results["parts"].append(vl_parts)
-
-            try:
-                acc_res = self.acc_function()
-
-                acc_list = self.results.get("val_acc", [])
-                acc_list.append(acc_res)
-                self.results["val_acc"] = acc_list
-                print(f"** on validation data acc is \n{acc_res}")
-            except Exception as e:
-                if not warned_acc:
-                    warned_acc = True
-                    print("Not recording acc:", e)
-
-            print(f"Time taken for 1 epoch: {time.time() - start:.2f} secs\n")
-
-            if min(self.results["val_loss"]) < min(
-                self.results["val_loss"][-early_stop:]
-            ):
-                print(
-                    f"Stopping early, last {early_stop} val losses are: {self.results['val_loss'][-early_stop:]} \
-                      \nBest was {min(self.results['val_loss']):.3f}\n\n"
-                )
-                break
-
-            if (epoch + 1) % ckpt_every == 0:
-                ckpt_save_path = self.ckpt_manager.save()
-                print(f"Saving checkpoint for epoch {epoch + 1} at {ckpt_save_path}")
+    return masked
