@@ -12,7 +12,9 @@ def decoder_layer(
     x = layers.Input(shape=(None, d_model))
     mask = layers.Input(shape=(None, None, None))
 
-    y = layers.MultiHeadAttention(num_heads, d_model)(x, x, x, attention_mask=mask)
+    y = layers.MultiHeadAttention(num_heads, d_model)(
+        x, x, x, attention_mask=mask, use_causal_mask=True
+    )
     y = layers.Dropout(rate)(y)
     y = layers.LayerNormalization(epsilon=epsilon)(y + x)
 
@@ -100,7 +102,6 @@ def masked_loss(loss_fn):
         mask = tf.cast(mask, dtype=y_true.dtype)
         raw_loss = loss_fn(y_true, y_pred)
         raw_loss *= mask
-        print(raw_loss.shape)
-        return tf.reduce_sum(raw_loss) / tf.reduce_sum(mask, axis=-1)
+        return tf.reduce_sum(raw_loss) / tf.reduce_sum(mask)
 
     return masked
