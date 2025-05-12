@@ -78,7 +78,7 @@ def Transformer(
         rate=rate,
         epsilon=epsilon,
     )([tar_inp, mask])
-    y = layers.Dense(d_model)(y)
+    y = layers.Dense(d_model, name="FinalLayer")(y)
 
     outputs = []
 
@@ -94,6 +94,15 @@ def Transformer(
         y = layers.Concatenate()([y, to_add])
 
     return keras.Model([tar, mask], outputs, name="Transformer")
+
+
+def transformer_feedforward(transformer: keras.Model, x, mask, order):
+    dec_output = transformer.get_layer("Decoder")([x, mask])
+    final_output = transformer.get_layer("FinalOutput")(dec_output)
+    pred_values = {}
+    for key in order:
+        pred_values[key] = transformer.get_layer(key)(final_output)
+    pass
 
 
 def masked_loss(loss_fn):
