@@ -1,3 +1,4 @@
+from typing import override
 import tensorflow as tf
 import time
 
@@ -42,6 +43,15 @@ class DecoderLayer(tf.keras.layers.Layer):
 
         return out3, attn_weights_block1
 
+    @override
+    def build(self, input_shape: Any, /) -> None:
+        self.mha1.build(input_shape)
+        self.ffn.build(input_shape)
+        self.layernorm1.build(input_shape)
+        self.layernorm3.build(input_shape)
+        self.dropout1.build(input_shape)
+        self.dropout3.build(input_shape)
+
 
 class Decoder(tf.keras.layers.Layer):
     def __init__(
@@ -56,20 +66,19 @@ class Decoder(tf.keras.layers.Layer):
     ):
         super(Decoder, self).__init__()
 
+        self.max_pe = maximum_position_encoding
         self.d_model = d_model
         self.num_layers = num_layers
 
         self.input_layer = tf.keras.Sequential(
             [
-                tf.keras.layers.Input((None, inp_dim)),
+                # tf.keras.layers.Input((None, inp_dim)),
                 tf.keras.layers.Dense(
                     dff, activation="relu"
                 ),  # (batch_size, seq_len, dff)
                 tf.keras.layers.Dense(d_model),  # (batch_size, seq_len, d_model)
             ]
         )
-
-        self.pos_encoding = positional_encoding(maximum_position_encoding, d_model)
 
         self.dec_layers = [
             DecoderLayer(d_model, num_heads, dff, rate) for _ in range(num_layers)
@@ -82,7 +91,8 @@ class Decoder(tf.keras.layers.Layer):
         seq_len = tf.shape(x)[1]
         attention_weights = {}
 
-        x += self.pos_encoding[:, :seq_len, :]
+        pos_encoding = positional_encoding(self.max_pe, self.d_model)
+        x += pos_encoding[:, :seq_len, :]
 
         x = self.dropout(x, training=training)
 
@@ -95,6 +105,14 @@ class Decoder(tf.keras.layers.Layer):
 
         # x.shape == (batch_size, target_seq_len, d_model)
         return x, attention_weights
+
+    @override
+    def build(self, input_shape: Any, /) -> None:
+        self.input_layer.build(input_shape)
+        self.dropout.build(input_shape)
+        input_shape = (input_shape[:-1], self.d_model)
+        for i in range(self.num_layers):
+            self.dec_layers[i].build(input_shape)
 
 
 class Transformer(tf.keras.Model):
@@ -114,6 +132,7 @@ class Transformer(tf.keras.Model):
     ):
         super(Transformer, self).__init__()
 
+        self.d_model = d_model
         self.decoder = Decoder(
             num_layers_dec,
             d_model,
@@ -148,6 +167,26 @@ class Transformer(tf.keras.Model):
         self.results = dict(
             [(x, []) for x in ["loss", "val_loss", "val_loss_full", "parts"]]
         )
+
+    @override
+    def build(self, input_shape: Any) -> None:
+        self.decoder.build(input_shape)
+        self.final_layer.build((input_shape[0], input_shape[1], self.d_model))
+        for net_name in self.ORDER:
+            self.__getattribute__(net_name).build(
+                (
+                    input_shape[0],
+                    input_shape[1],
+                    self.d_model
+                    + sum(
+                        [
+                            self.FIELD_DIMS_IN[nn]
+                            for nn in self.ORDER
+                            if self.FIELD_STARTS_IN[nn] < self.FIELD_STARTS_IN[net_name]
+                        ]
+                    ),
+                )
+            )
 
     def call(self, tar, look_ahead_mask, dec_padding_mask, training=True):
         tar_inp = tar[:, :-1]  # predict next from this

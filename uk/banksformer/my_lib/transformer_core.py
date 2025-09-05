@@ -1,3 +1,4 @@
+from typing import Any, override
 import tensorflow as tf
 import numpy as np
 
@@ -151,6 +152,13 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         """
         x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
         return tf.transpose(x, perm=[0, 2, 1, 3])
+
+    @override
+    def build(self, input_shape: Any, /) -> None:
+        self.wq.build(input_shape)
+        self.wk.build(input_shape)
+        self.wv.build(input_shape)
+        self.dense.build((input_shape[0], input_shape[1], self.d_model))
 
     def call(self, v, k, q, mask):
         batch_size = tf.shape(q)[0]
